@@ -1,7 +1,6 @@
 import argparse
 import concurrent
 import json
-import threading
 
 import pandas as pd
 from sqlalchemy import create_engine
@@ -12,20 +11,12 @@ from utils.filmstrip import generate_filmstrip, upload_filmstrip_to_s3, check_fi
     S3_KEY_BASE_PATH, FILMSTRIP_INDEX_FILE
 from utils.media_processor import MediaProcessor
 
-# Lock for thread-safe operations
-s3_lock = threading.Lock()
-filmstrip_lock = threading.Lock()
-cleanup_lock = threading.Lock()
-download_lock = threading.Lock()
-
 
 def process_row(row):
     project_id = row['project_id']
     content_id = row['content_id']
-    with s3_lock:
-        file_exists = check_file_in_s3(STATIC_ASSETS_BUCKET,
-                                       S3_KEY_BASE_PATH.format(project_id, content_id, FILMSTRIP_INDEX_FILE))
-    if not file_exists:
+    if not check_file_in_s3(STATIC_ASSETS_BUCKET,
+                            S3_KEY_BASE_PATH.format(project_id, content_id, FILMSTRIP_INDEX_FILE)):
         try:
             processor = MediaProcessor(
                 project_id=row['project_id'],
@@ -36,19 +27,13 @@ def process_row(row):
                 import_url=row['import_url'],
                 import_source_type=row['import_source_type'],
             )
-            with download_lock:
-                input_file = processor.process_media()
-
-            with filmstrip_lock:
-                generate_filmstrip(input_file, project_id, content_id)
-
-            with s3_lock:
-                upload_filmstrip_to_s3(project_id, content_id)
+            input_file = processor.process_media()
+            generate_filmstrip(input_file, project_id, content_id)
+            upload_filmstrip_to_s3(project_id, content_id)
         except Exception as ex:
             print(f"Exception: {ex}")
         finally:
-            with cleanup_lock:
-                cleanup_directory(project_id, content_id)
+            cleanup_directory(project_id, content_id)
 
 
 if __name__ == "__main__":
@@ -77,7 +62,7 @@ if __name__ == "__main__":
 
     if env == "prod":
         prod_creds = secrets_manager.get_secret_value(
-            SecretId="prod/content-lab-db/readonly"
+        SecretId="prod/content-lab-db/readonly"
         )["SecretString"]
         db = json.loads(prod_creds)
         db_username = db["USER"]
@@ -89,7 +74,7 @@ if __name__ == "__main__":
     else:
         alpha_creds = secrets_manager.get_secret_value(
             SecretId="alpha-content-lab-db/readonly"
-        )["SecretString"]
+    )["SecretString"]
         db = json.loads(alpha_creds)
         db_username = db["USER"]
         db_password = db["PASSWORD"]
@@ -109,10 +94,9 @@ if __name__ == "__main__":
     engine = create_engine(connection_string)
 
     # Define the SQL query to read data from the content_upload table
-    query = (
-        "select id as content_id, project_id, import_source_type, import_url from content_upload WHERE created_at >= "
-        "NOW() - INTERVAL '{}"
-        "days' and deleted is null and av_type='VIDEO' and import_source_type is not null and import_url is not null")
+    query = ("select id as content_id, project_id, import_source_type, import_url from content_upload WHERE created_at >= "
+             "NOW() - INTERVAL '{}"
+             "days' and deleted is null and av_type='VIDEO' and import_source_type is not null and import_url is not null")
 
     # Read the data into a pandas DataFrame
     df = pd.read_sql(query.format(days), engine)
