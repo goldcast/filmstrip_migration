@@ -9,7 +9,7 @@ import boto3
 from utils.cleanup import cleanup_directory
 from utils.filmstrip import generate_filmstrip, upload_filmstrip_to_s3, check_file_in_s3, STATIC_ASSETS_BUCKET, \
     S3_KEY_BASE_PATH, FILMSTRIP_INDEX_FILE
-from utils.recordings import download_m3u8_and_ts_files
+from utils.recordings import get_m3u8
 
 
 def process_row(row):
@@ -18,10 +18,10 @@ def process_row(row):
     if not check_file_in_s3(STATIC_ASSETS_BUCKET,
                             S3_KEY_BASE_PATH.format(event_id, broadcast_id, FILMSTRIP_INDEX_FILE)):
         try:
-            downloaded_file_name = download_m3u8_and_ts_files(
+            m3u8 = get_m3u8(
                 event_id, broadcast_id, env, simulive_server
             )
-            generate_filmstrip(downloaded_file_name, event_id, broadcast_id)
+            generate_filmstrip(m3u8, event_id, broadcast_id)
             upload_filmstrip_to_s3(event_id, broadcast_id)
         except Exception as ex:
             print(f"Exception: {ex}")
