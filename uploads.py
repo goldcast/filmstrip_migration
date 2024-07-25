@@ -91,7 +91,8 @@ if __name__ == "__main__":
 
     # Define the SQL query to read data from the content_upload table
     query = ("select id as content_id, project_id from content_upload WHERE created_at >= NOW() - INTERVAL '{} "
-             "days' and deleted is null and av_type='VIDEO' and import_source_type is null and import_url is null")
+             "days' and deleted is null and av_type='VIDEO' and import_source_type is null and import_url is null and "
+             "is_sample_upload='false'")
 
     # Read the data into a pandas DataFrame
     df = pd.read_sql(query.format(days), engine)

@@ -6,8 +6,6 @@ import pandas as pd
 from sqlalchemy import create_engine
 import boto3
 
-from utils.filmstrip import upload_files_to_s3, check_file_in_s3, FILMSTRIP_INDEX_FILE
-
 secrets_manager = boto3.client("secretsmanager")
 STATIC_ASSETS_BUCKET = "staticassets.goldcast.com"
 S3_KEY_PRESEEDED_BASE_PATH = "content-lab/filmstrip/pre-seeded/filmstrip_index.json"
@@ -35,7 +33,7 @@ db_name = None
 
 if env == "prod":
     prod_creds = secrets_manager.get_secret_value(
-    SecretId="prod/content-lab-db/readonly"
+        SecretId="prod/content-lab-db/readonly"
     )["SecretString"]
     db = json.loads(prod_creds)
     db_username = db["USER"]
@@ -47,7 +45,7 @@ if env == "prod":
 else:
     alpha_creds = secrets_manager.get_secret_value(
         SecretId="alpha-content-lab-db/readonly"
-)["SecretString"]
+    )["SecretString"]
     db = json.loads(alpha_creds)
     db_username = db["USER"]
     db_password = db["PASSWORD"]
@@ -73,27 +71,25 @@ query = ("select id as content_id, project_id from content_upload WHERE created_
 df = pd.read_sql(query.format(days), engine)
 
 
-def download_file_from_s3(local_file_name):
-    s3 = boto3.client('s3')
-    s3.download_file(STATIC_ASSETS_BUCKET, S3_KEY_PRESEEDED_BASE_PATH, local_file_name)
-    print(f"{local_file_name} has size: {os.path.getsize(local_file_name)}")
-    return local_file_name
+def copy_s3_file(source_bucket, source_key, destination_bucket, destination_key):
+    try:
+        s3 = boto3.client('s3')
+        copy_source = {'Bucket': source_bucket, 'Key': source_key}
+        s3.copy_object(CopySource=copy_source, Bucket=destination_bucket, Key=destination_key)
+        print(f'Successfully copied {source_key} from {source_bucket} to {destination_bucket}/{destination_key}')
+    except Exception as e:
+        print(f"Error: {e}")
 
 
 # Function to apply
 def process_row(row):
     project_id = row['project_id']
     content_id = row['content_id']
-    if not check_file_in_s3(STATIC_ASSETS_BUCKET,
-                            S3_KEY_BASE_PATH.format(project_id, content_id, FILMSTRIP_INDEX_FILE)):
-        upload_files_to_s3(STATIC_ASSETS_BUCKET, S3_KEY_BASE_PATH.format(project_id, content_id), "index.json")
+    copy_s3_file(STATIC_ASSETS_BUCKET, S3_KEY_PRESEEDED_BASE_PATH, STATIC_ASSETS_BUCKET, S3_KEY_BASE_PATH.format(project_id, content_id))
 
 
-download_file_from_s3("index.json")
 # Apply the function to each row
 with concurrent.futures.ThreadPoolExecutor() as executor:
     executor.map(process_row, [row for _, row in df.iterrows()])
-
-os.remove("index.json")
 # Close the connection
 engine.dispose()

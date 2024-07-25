@@ -102,9 +102,10 @@ def upload_files_to_s3(bucket_name, s3_file_key, local_file_name):
 def check_file_in_s3(bucket_name, s3_file_key):
     try:
         s3 = boto3.client('s3')
-        s3.head_object(Bucket=bucket_name, Key=s3_file_key)
-        print(f"File already exists {bucket_name}/{s3_file_key}")
-        return True
+        response = s3.get_object(Bucket=bucket_name, Key=s3_file_key)
+        file_content = response['Body'].read().decode('utf-8')
+        print(f"Successfully read JSON file from {bucket_name}/{s3_file_key}")
+        return len(json.loads(file_content)['filmstrip_file_names']) > 0
     except ClientError as e:
         if e.response['Error']['Code'] == '404':
             print(f"File not found: {s3_file_key}")
