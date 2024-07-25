@@ -1,5 +1,6 @@
 import argparse
 import concurrent
+import functools
 import json
 
 import pandas as pd
@@ -12,7 +13,7 @@ from utils.filmstrip import generate_filmstrip, upload_filmstrip_to_s3, check_fi
 from utils.recordings import download_m3u8_and_ts_files
 
 
-def process_row(row):
+def process_row(env, simulive_server, row):
     event_id = row['event_id']
     broadcast_id = row['broadcast_id']
     if not check_file_in_s3(STATIC_ASSETS_BUCKET,
@@ -76,6 +77,7 @@ if __name__ == "__main__":
         db_port = db["PORT"]
         db_name = db["NAME"]
 
+    row_processor = functools.partial(process_row, env, simulive_server)
     # Ensure that all necessary environment variables are set
     if not all([db_username, db_password, db_host, db_port, db_name]):
         raise ValueError("One or more environment variables are missing. Please set DB_USERNAME, DB_PASSWORD, DB_HOST, "
@@ -100,7 +102,7 @@ if __name__ == "__main__":
 
     # Apply the function to each row
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        executor.map(process_row, [row for _, row in df.iterrows()])
+        executor.map(row_processor, [row for _, row in df.iterrows()])
 
     # Close the connection
     engine.dispose()
