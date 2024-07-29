@@ -1,0 +1,118 @@
+Index: utils/filmstrip.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import json\nimport logging\nimport os\nimport subprocess\nfrom concurrent.futures import ThreadPoolExecutor\nimport boto3\nfrom botocore.exceptions import NoCredentialsError, ClientError\n\nlogger = logging.getLogger(__name__)\nFILMSTRIP_FPS = 2\nFILMSTRIP_INDEX_FILE = \"filmstrip_index.json\"\nFILMSTRIP_INDEX_KEY = \"filmstrip_file_names\"\nS3_KEY_BASE_PATH = \"content-lab/filmstrip/{}/{}/{}\"\nOUTPUT_DIRECTORY = \"downloads/{}/{}\"\nSTATIC_ASSETS_BUCKET = \"staticassets.goldcast.com\"\nNUM_PARALLEL_UPLOADS = 5\n\n\ndef generate_filmstrip(input_file, project_id, content_id):\n    output_directory = OUTPUT_DIRECTORY.format(project_id, content_id)\n    os.makedirs(output_directory, exist_ok=True)\n    # Generate multiple images with filmstrip of the complete video file where each image contains 30 frames\n    cmd = [\n        \"ffmpeg\",\n        \"-i\",\n        input_file,\n        \"-vf\",\n        f\"fps={FILMSTRIP_FPS},scale=200:-1,tile=5x6\",\n        f\"{output_directory}/filmstrip_%04d.png\",\n        \"-y\",\n    ]\n    logger.info(f\"command : {cmd}\")\n    try:\n        subprocess.run(cmd, check=True)\n        convert_png_to_webp(output_directory)\n\n    except Exception as err:\n        logger.exception(f\"An error occurred while generating the film strip: {err}\")\n\n\ndef convert_png_to_webp(output_directory):\n    for root, _, files in os.walk(output_directory):\n        for file in files:\n            if file.endswith(\".png\"):\n                file_path = os.path.join(root, file)\n                cmd = [\n                    \"ffmpeg\",\n                    \"-i\",\n                    file_path,\n                    \"-c:v\",\n                    \"libwebp\",\n                    f\"{output_directory}/{os.path.splitext(os.path.basename(file_path))[0]}.webp\",\n                    \"-y\",\n                ]\n                subprocess.run(cmd, check=True)\n\n\ndef upload_filmstrip_to_s3(project_id, content_id):\n    try:\n        output_directory = OUTPUT_DIRECTORY.format(project_id, content_id)\n        with ThreadPoolExecutor(max_workers=NUM_PARALLEL_UPLOADS) as executor:\n            filmstrip_file_paths = []\n            for root, _, files in os.walk(output_directory):\n                for file in files:\n                    if file.endswith(\".webp\"):\n                        file_path = os.path.join(root, file)\n                        s3_file_key = S3_KEY_BASE_PATH.format(project_id, content_id, file)\n                        filmstrip_file_paths.append(s3_file_key)\n                        executor.submit(upload_files_to_s3, STATIC_ASSETS_BUCKET, s3_file_key, file_path)\n\n            filmstrip_index_filepath = os.path.join(output_directory, FILMSTRIP_INDEX_FILE)\n            s3_index_file_key = store_filmstrip_index_in_json(project_id, content_id, filmstrip_index_filepath,\n                                                              filmstrip_file_paths)\n            executor.submit(upload_files_to_s3, STATIC_ASSETS_BUCKET, s3_index_file_key, filmstrip_index_filepath)\n\n    except Exception as err:\n        logger.exception(f\"An error occurred while uploading the film strip to S3 bucket: {err}\")\n\n\ndef store_filmstrip_index_in_json(project_id, content_id, filmstrip_index_filepath, filmstrip_file_paths):\n    # Creating dictionary to store the index files\n    filmstrip_file_paths.sort()\n    data = {FILMSTRIP_INDEX_KEY: filmstrip_file_paths}\n\n    with open(filmstrip_index_filepath, 'w') as json_file:\n        json.dump(data, json_file, indent=4)\n    s3_file_key = S3_KEY_BASE_PATH.format(project_id, content_id, FILMSTRIP_INDEX_FILE)\n    return s3_file_key\n\n\ndef upload_files_to_s3(bucket_name, s3_file_key, local_file_name):\n    s3 = boto3.client('s3')\n    try:\n        s3.upload_file(local_file_name, bucket_name, s3_file_key)\n        print(f\"File uploaded successfully to {bucket_name}/{s3_file_key}\")\n    except FileNotFoundError:\n        print(f\"The file {local_file_name} was not found.\")\n    except NoCredentialsError:\n        print(\"Credentials not available or incorrect.\")\n\n\ndef check_file_in_s3(bucket_name, s3_file_key):\n    try:\n        s3 = boto3.client('s3')\n        s3.head_object(Bucket=bucket_name, Key=s3_file_key)\n        print(f\"File already exists {bucket_name}/{s3_file_key}\")\n        return True\n    except ClientError as e:\n        if e.response['Error']['Code'] == '404':\n            print(f\"File not found: {s3_file_key}\")\n        else:\n            print(f\"Error occurred: {e}\")\n        return False\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/utils/filmstrip.py b/utils/filmstrip.py
+--- a/utils/filmstrip.py	(revision e640e16a24f2a3202cf4c060806b482ffa9aa356)
++++ b/utils/filmstrip.py	(date 1721918713109)
+@@ -102,9 +102,10 @@
+ def check_file_in_s3(bucket_name, s3_file_key):
+     try:
+         s3 = boto3.client('s3')
+-        s3.head_object(Bucket=bucket_name, Key=s3_file_key)
+-        print(f"File already exists {bucket_name}/{s3_file_key}")
+-        return True
++        response = s3.get_object(Bucket=bucket_name, Key=s3_file_key)
++        file_content = response['Body'].read().decode('utf-8')
++        print(f"Successfully read JSON file from {bucket_name}/{s3_file_key}")
++        return len(json.loads(file_content)['filmstrip_file_names']) > 0
+     except ClientError as e:
+         if e.response['Error']['Code'] == '404':
+             print(f"File not found: {s3_file_key}")
+Index: upload_preseeded.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import argparse\nimport concurrent\nimport json\nimport os\nimport pandas as pd\nfrom sqlalchemy import create_engine\nimport boto3\n\nfrom utils.filmstrip import upload_files_to_s3, check_file_in_s3, FILMSTRIP_INDEX_FILE\n\nsecrets_manager = boto3.client(\"secretsmanager\")\nSTATIC_ASSETS_BUCKET = \"staticassets.goldcast.com\"\nS3_KEY_PRESEEDED_BASE_PATH = \"content-lab/filmstrip/pre-seeded/filmstrip_index.json\"\nS3_KEY_BASE_PATH = \"content-lab/filmstrip/{}/{}/filmstrip_index.json\"\n\nVES_TOKEN = secrets_manager.get_secret_value(\n    SecretId=\"prod/content-lab-credentials\"\n)[\"SecretString\"]\nmediastore_endpoint = (\n    \"https://uago73t2my3lb2.data.mediastore.us-east-1.amazonaws.com\"\n)\n\nparser = argparse.ArgumentParser()\nparser.add_argument(\"--env\", type=str, default=\"prod\")\nparser.add_argument(\"--days\", type=str, default=\"7\")\nargs = parser.parse_args()\nenv = args.env\ndays = args.days\n\ndb_username = None\ndb_password = None\ndb_host = None\ndb_port = None\ndb_name = None\n\nif env == \"prod\":\n    prod_creds = secrets_manager.get_secret_value(\n    SecretId=\"prod/content-lab-db/readonly\"\n    )[\"SecretString\"]\n    db = json.loads(prod_creds)\n    db_username = db[\"USER\"]\n    db_password = db[\"PASSWORD\"]\n    db_host = db[\"HOST\"]\n    db_port = db[\"PORT\"]\n    db_name = db[\"NAME\"]\n\nelse:\n    alpha_creds = secrets_manager.get_secret_value(\n        SecretId=\"alpha-content-lab-db/readonly\"\n)[\"SecretString\"]\n    db = json.loads(alpha_creds)\n    db_username = db[\"USER\"]\n    db_password = db[\"PASSWORD\"]\n    db_host = db[\"HOST\"]\n    db_port = db[\"PORT\"]\n    db_name = db[\"NAME\"]\n\n# Ensure that all necessary environment variables are set\nif not all([db_username, db_password, db_host, db_port, db_name]):\n    raise ValueError(\"One or more environment variables are missing. Please set DB_USERNAME, DB_PASSWORD, DB_HOST, \"\n                     \"DB_PORT, and DB_NAME.\")\n\n# Create a connection string for PostgreSQL\nconnection_string = f'postgresql://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}'\n\n# Create a database engine\nengine = create_engine(connection_string)\n\n# Define the SQL query to read data from the content_upload table\nquery = (\"select id as content_id, project_id from content_upload WHERE created_at >= NOW() - INTERVAL '{} \"\n         \"days' and deleted is null and av_type='VIDEO' and is_sample_upload='true'\")\n# Read the data into a pandas DataFrame\ndf = pd.read_sql(query.format(days), engine)\n\n\ndef download_file_from_s3(local_file_name):\n    s3 = boto3.client('s3')\n    s3.download_file(STATIC_ASSETS_BUCKET, S3_KEY_PRESEEDED_BASE_PATH, local_file_name)\n    print(f\"{local_file_name} has size: {os.path.getsize(local_file_name)}\")\n    return local_file_name\n\n\n# Function to apply\ndef process_row(row):\n    project_id = row['project_id']\n    content_id = row['content_id']\n    if not check_file_in_s3(STATIC_ASSETS_BUCKET,\n                            S3_KEY_BASE_PATH.format(project_id, content_id, FILMSTRIP_INDEX_FILE)):\n        upload_files_to_s3(STATIC_ASSETS_BUCKET, S3_KEY_BASE_PATH.format(project_id, content_id), \"index.json\")\n\n\ndownload_file_from_s3(\"index.json\")\n# Apply the function to each row\nwith concurrent.futures.ThreadPoolExecutor() as executor:\n    executor.map(process_row, [row for _, row in df.iterrows()])\n\nos.remove(\"index.json\")\n# Close the connection\nengine.dispose()\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/upload_preseeded.py b/upload_preseeded.py
+--- a/upload_preseeded.py	(revision e640e16a24f2a3202cf4c060806b482ffa9aa356)
++++ b/upload_preseeded.py	(date 1721915559763)
+@@ -6,8 +6,6 @@
+ from sqlalchemy import create_engine
+ import boto3
+ 
+-from utils.filmstrip import upload_files_to_s3, check_file_in_s3, FILMSTRIP_INDEX_FILE
+-
+ secrets_manager = boto3.client("secretsmanager")
+ STATIC_ASSETS_BUCKET = "staticassets.goldcast.com"
+ S3_KEY_PRESEEDED_BASE_PATH = "content-lab/filmstrip/pre-seeded/filmstrip_index.json"
+@@ -35,7 +33,7 @@
+ 
+ if env == "prod":
+     prod_creds = secrets_manager.get_secret_value(
+-    SecretId="prod/content-lab-db/readonly"
++        SecretId="prod/content-lab-db/readonly"
+     )["SecretString"]
+     db = json.loads(prod_creds)
+     db_username = db["USER"]
+@@ -47,7 +45,7 @@
+ else:
+     alpha_creds = secrets_manager.get_secret_value(
+         SecretId="alpha-content-lab-db/readonly"
+-)["SecretString"]
++    )["SecretString"]
+     db = json.loads(alpha_creds)
+     db_username = db["USER"]
+     db_password = db["PASSWORD"]
+@@ -73,27 +71,25 @@
+ df = pd.read_sql(query.format(days), engine)
+ 
+ 
+-def download_file_from_s3(local_file_name):
+-    s3 = boto3.client('s3')
+-    s3.download_file(STATIC_ASSETS_BUCKET, S3_KEY_PRESEEDED_BASE_PATH, local_file_name)
+-    print(f"{local_file_name} has size: {os.path.getsize(local_file_name)}")
+-    return local_file_name
++def copy_s3_file(source_bucket, source_key, destination_bucket, destination_key):
++    try:
++        s3 = boto3.client('s3')
++        copy_source = {'Bucket': source_bucket, 'Key': source_key}
++        s3.copy_object(CopySource=copy_source, Bucket=destination_bucket, Key=destination_key)
++        print(f'Successfully copied {source_key} from {source_bucket} to {destination_bucket}/{destination_key}')
++    except Exception as e:
++        print(f"Error: {e}")
+ 
+ 
+ # Function to apply
+ def process_row(row):
+     project_id = row['project_id']
+     content_id = row['content_id']
+-    if not check_file_in_s3(STATIC_ASSETS_BUCKET,
+-                            S3_KEY_BASE_PATH.format(project_id, content_id, FILMSTRIP_INDEX_FILE)):
+-        upload_files_to_s3(STATIC_ASSETS_BUCKET, S3_KEY_BASE_PATH.format(project_id, content_id), "index.json")
++    copy_s3_file(STATIC_ASSETS_BUCKET, S3_KEY_PRESEEDED_BASE_PATH, STATIC_ASSETS_BUCKET, S3_KEY_BASE_PATH.format(project_id, content_id))
+ 
+ 
+-download_file_from_s3("index.json")
+ # Apply the function to each row
+ with concurrent.futures.ThreadPoolExecutor() as executor:
+     executor.map(process_row, [row for _, row in df.iterrows()])
+-
+-os.remove("index.json")
+ # Close the connection
+ engine.dispose()
+Index: uploads.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import argparse\nimport concurrent\nimport json\n\nimport pandas as pd\nfrom sqlalchemy import create_engine\nimport boto3\n\nfrom utils.cleanup import cleanup_directory\nfrom utils.filmstrip import generate_filmstrip, upload_filmstrip_to_s3, check_file_in_s3, STATIC_ASSETS_BUCKET, \\\n    S3_KEY_BASE_PATH, FILMSTRIP_INDEX_FILE\nfrom utils.media_processor import MediaProcessor\n\n\ndef process_row(row):\n    project_id = row['project_id']\n    content_id = row['content_id']\n    s3_index_key = S3_KEY_BASE_PATH.format(project_id, content_id, FILMSTRIP_INDEX_FILE)\n    if not check_file_in_s3(STATIC_ASSETS_BUCKET, s3_index_key):\n        try:\n            processor = MediaProcessor(\n                project_id=project_id,\n                content_id=content_id,\n                media_type='VIDEO',\n                mediastore_endpoint=mediastore_endpoint,\n                ves_token=VES_TOKEN,\n            )\n            input_file = processor.process_media()\n            generate_filmstrip(input_file, project_id, content_id)\n            upload_filmstrip_to_s3(project_id, content_id)\n        except Exception as ex:\n            print(f\"Exception: {ex}\")\n        finally:\n            cleanup_directory(project_id, content_id)\n\n\nif __name__ == \"__main__\":\n    secrets_manager = boto3.client(\"secretsmanager\")\n\n    VES_TOKEN = secrets_manager.get_secret_value(\n        SecretId=\"prod/content-lab-credentials\"\n    )[\"SecretString\"]\n    mediastore_endpoint = (\n        \"https://uago73t2my3lb2.data.mediastore.us-east-1.amazonaws.com\"\n    )\n\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--env\", type=str, default=\"prod\")\n    parser.add_argument(\"--days\", type=str, default=\"7\")\n    args = parser.parse_args()\n    env = args.env\n    days = args.days\n    db_username = None\n    db_password = None\n    db_host = None\n    db_port = None\n    db_name = None\n\n    if env == \"prod\":\n        prod_creds = secrets_manager.get_secret_value(\n        SecretId=\"prod/content-lab-db/readonly\"\n        )[\"SecretString\"]\n        db = json.loads(prod_creds)\n        db_username = db[\"USER\"]\n        db_password = db[\"PASSWORD\"]\n        db_host = db[\"HOST\"]\n        db_port = db[\"PORT\"]\n        db_name = db[\"NAME\"]\n\n    else:\n        alpha_creds = secrets_manager.get_secret_value(\n            SecretId=\"alpha-content-lab-db/readonly\"\n    )[\"SecretString\"]\n        db = json.loads(alpha_creds)\n        db_username = db[\"USER\"]\n        db_password = db[\"PASSWORD\"]\n        db_host = db[\"HOST\"]\n        db_port = db[\"PORT\"]\n        db_name = db[\"NAME\"]\n\n    # Ensure that all necessary environment variables are set\n    if not all([db_username, db_password, db_host, db_port, db_name]):\n        raise ValueError(\"One or more environment variables are missing. Please set DB_USERNAME, DB_PASSWORD, DB_HOST, \"\n                         \"DB_PORT, and DB_NAME.\")\n\n    # Create a connection string for PostgreSQL\n    connection_string = f'postgresql://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}'\n\n    # Create a database engine\n    engine = create_engine(connection_string)\n\n    # Define the SQL query to read data from the content_upload table\n    query = (\"select id as content_id, project_id from content_upload WHERE created_at >= NOW() - INTERVAL '{} \"\n             \"days' and deleted is null and av_type='VIDEO' and import_source_type is null and import_url is null\")\n\n    # Read the data into a pandas DataFrame\n    df = pd.read_sql(query.format(days), engine)\n\n    # Display the first few rows of the DataFrame\n    print(\"Data from content_upload table:\")\n    print(df.head())\n\n    with concurrent.futures.ThreadPoolExecutor() as executor:\n        executor.map(process_row, [row for _, row in df.iterrows()])\n\n    # Close the connection\n    engine.dispose()\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/uploads.py b/uploads.py
+--- a/uploads.py	(revision e640e16a24f2a3202cf4c060806b482ffa9aa356)
++++ b/uploads.py	(date 1721914458073)
+@@ -91,7 +91,8 @@
+ 
+     # Define the SQL query to read data from the content_upload table
+     query = ("select id as content_id, project_id from content_upload WHERE created_at >= NOW() - INTERVAL '{} "
+-             "days' and deleted is null and av_type='VIDEO' and import_source_type is null and import_url is null")
++             "days' and deleted is null and av_type='VIDEO' and import_source_type is null and import_url is null and "
++             "is_sample_upload='false'")
+ 
+     # Read the data into a pandas DataFrame
+     df = pd.read_sql(query.format(days), engine)
