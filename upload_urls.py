@@ -53,7 +53,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     env = args.env
     days = args.days
-    max_worker = args.max_workers
+    max_worker = args.max_worker
     db_username = None
     db_password = None
     db_host = None
